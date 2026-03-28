@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import json
 import uuid
 import asyncio
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from dotenv import load_dotenv
@@ -86,15 +86,15 @@ async def broadcast_periodic():
             db = SessionLocal()
             try:
                 users_result = db.execute(text("""
-                    SELECT ST_Y(location::geometry) AS latitude,
-                           ST_X(location::geometry) AS longitude
+                    SELECT ST_Y(location_geom::geometry) AS latitude,
+                           ST_X(location_geom::geometry) AS longitude
                     FROM users;
                 """))
 
                 # Fetch locations from responders
                 responders_result = db.execute(text("""
-                    SELECT ST_Y(location::geometry) AS latitude,
-                           ST_X(location::geometry) AS longitude
+                    SELECT ST_Y(location_geom::geometry) AS latitude,
+                           ST_X(location_geom::geometry) AS longitude
                     FROM responders;
                 """))
 
