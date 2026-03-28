@@ -1,4 +1,5 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 import json
 import uuid
 import asyncio
@@ -40,6 +41,14 @@ def root():
     return {"message": "API is running"}
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # allow all origins
+    allow_credentials=True,  # allow cookies/auth headers
+    allow_methods=["*"],  # allow all HTTP methods
+    allow_headers=["*"],  # allow all headers
+)
 
 class ConnectionManager:
     def __init__(self):
