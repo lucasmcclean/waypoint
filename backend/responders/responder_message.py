@@ -8,7 +8,6 @@ from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core import Document
 
-
 from index import responder_messages_index
 
 DATABASE_URL = os.getenv("DATABASE_URL", "uh oh")

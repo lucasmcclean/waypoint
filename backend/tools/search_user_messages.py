@@ -1,6 +1,6 @@
 from typing import Dict, Any
 
-from messages.user_message import query_user_messages
+from users.user_message import query_user_messages
 
 def search_user_messages(
     query: str,

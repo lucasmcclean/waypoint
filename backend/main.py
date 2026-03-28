@@ -3,15 +3,13 @@ from fastapi.middleware.cors import CORSMiddleware
 import json
 import uuid
 import asyncio
-from fastapi import FastAPI
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from dotenv import load_dotenv
 import os
 
-from messages.user_message import add_user_message
+from users.user_message import add_user_message
 
 load_dotenv()
 
@@ -124,5 +122,5 @@ async def handle_message(client_id: str = "", content: str = ""):
     if current_type == "User":
         add_user_message(content, client_id)
     else:
-        await manager.broadcast(json.dumps({ "responder_message": content }));
+        await manager.broadcast(json.dumps({ "responder_message": content }))
     return {"status": "message handled"}
