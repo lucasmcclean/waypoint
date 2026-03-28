@@ -16,7 +16,7 @@ embedding_model = HuggingFaceEmbedding(
     model_name="sentence-transformers/all-MiniLM-L6-v2"
 )
 
-vector_store = PGVectorStore.from_params(
+user_messages_vector_store = PGVectorStore.from_params(
     database="app_db",
     host="db",
     user="postgres",
@@ -26,7 +26,22 @@ vector_store = PGVectorStore.from_params(
     embed_dim=384,
 )
 
-index = VectorStoreIndex.from_vector_store(
-        vector_store,
+responder_messages_vector_store = PGVectorStore.from_params(
+    database="app_db",
+    host="db",
+    user="postgres",
+    password="postgres",
+    port=5432,
+    table_name="embedded_responder_messages",
+    embed_dim=384,
+)
+
+user_messages_index = VectorStoreIndex.from_vector_store(
+        user_messages_vector_store,
+        embed_model=embedding_model,
+)
+
+responder_messages_index = VectorStoreIndex.from_vector_store(
+        responder_messages_vector_store,
         embed_model=embedding_model,
 )
