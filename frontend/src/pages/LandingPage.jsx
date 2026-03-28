@@ -32,24 +32,38 @@ function LandingPage() {
   const navigate = useNavigate()
   const [activeRole, setActiveRole] = useState(null)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
 
   async function handleModeSelection(role) {
     setError('')
+    setNotice('')
     setActiveRole(role)
 
     try {
-      const location = await getCurrentLocation()
-      console.log(location)
+      let location = null
+
+      try {
+        location = await getCurrentLocation()
+        console.log("Fetched location")
+      } catch {
+        setNotice('Location is unavailable. Continuing in local demo mode.')
+      }
+
       const actor = await createActor({ role, location })
 
       sessionStorage.setItem(
         'activeActor',
         JSON.stringify({
           id: actor?.id,
-          class: role,
-          location,
+          class: actor?.class || role,
+          location: actor?.location ?? location,
+          source: actor?.source || 'dummy',
         }),
       )
+
+      if (actor?.source === 'dummy') {
+        setNotice('WebSocket backend unavailable. Using local demo actor.')
+      }
 
       navigate(role === 'user' ? '/user' : '/responder')
     } catch (requestError) {
@@ -87,6 +101,7 @@ function LandingPage() {
         </nav>
 
         {error ? <p className="mt-4 text-sm text-red-600">{error}</p> : null}
+        {notice ? <p className="mt-2 text-sm text-amber-700">{notice}</p> : null}
       </div>
     </section>
   )
