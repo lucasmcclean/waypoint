@@ -27,9 +27,18 @@ function getCurrentLocation(): Promise<LocationTuple | null> {
   })
 }
 
+function getLocationErrorMessage(error: GeolocationPositionError): string {
+  if (error.code === 1) return 'Permission denied'
+  if (error.code === 2) return 'Location unavailable'
+  if (error.code === 3) return 'Location timeout'
+  return 'Location error'
+}
+
 export default function ResponderView() {
   const [clientId, setClientId] = useState('connecting...')
   const [connectionState, setConnectionState] = useState('Connecting')
+  const [locationState, setLocationState] = useState('Locating')
+  const [locationRetryKey, setLocationRetryKey] = useState(0)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [queryText, setQueryText] = useState('')
   const [queryResult, setQueryResult] = useState('')
@@ -37,6 +46,7 @@ export default function ResponderView() {
   const [locations, setLocations] = useState<LocationTuple[]>([])
   const [regions, setRegions] = useState<RegionGroup[]>([])
   const [selectedRegionIndex, setSelectedRegionIndex] = useState<number | null>(null)
+  const [sessionController, setSessionController] = useState<SessionController | null>(null)
 
   useEffect(() => {
     let sessionController: SessionController | null = null
@@ -44,9 +54,12 @@ export default function ResponderView() {
 
     async function startSession() {
       const location = await getCurrentLocation()
+      if (location) {
+        setLocationState('Location ready')
+      }
 
       try {
-        sessionController = await connectRealtimeSession({
+        const controller = await connectRealtimeSession({
           role: 'responder',
           location,
           onClientId: (id) => {
@@ -68,6 +81,12 @@ export default function ResponderView() {
             setConnectionState('Error')
           },
         })
+        if (!mounted) {
+          controller.close()
+          return
+        }
+        sessionController = controller
+        setSessionController(controller)
       } catch {
         if (!mounted) return
         setConnectionState('Error')
@@ -81,6 +100,32 @@ export default function ResponderView() {
       sessionController?.close()
     }
   }, [])
+
+  useEffect(() => {
+    if (!sessionController) return
+    if (!navigator.geolocation) {
+      setLocationState('Geolocation unsupported')
+      return
+    }
+
+    setLocationState('Locating')
+
+    const watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        const nextLocation: LocationTuple = [position.coords.latitude, position.coords.longitude]
+        setLocationState('Location ready')
+        sessionController.sendLocation(nextLocation)
+      },
+      (error) => {
+        setLocationState(getLocationErrorMessage(error))
+      },
+      { enableHighAccuracy: false, timeout: 20000, maximumAge: 120000 },
+    )
+
+    return () => {
+      navigator.geolocation.clearWatch(watchId)
+    }
+  }, [sessionController, locationRetryKey])
 
   const liveBadgeClass = useMemo(() => {
     if (connectionState === 'Connected') return 'bg-green-600'
@@ -228,7 +273,15 @@ export default function ResponderView() {
           <div className="mt-4 flex items-center gap-6 text-sm text-gray-600">
             <span>Locations: {locations.length}</span>
             <span>Regions: {regions.length}</span>
+            <span>Location: {locationState}</span>
           </div>
+          <button
+            type="button"
+            onClick={() => setLocationRetryKey((value) => value + 1)}
+            className="mt-2 w-fit px-3 py-1.5 text-xs bg-gray-100 border border-gray-300 rounded hover:bg-gray-200"
+          >
+            Retry location
+          </button>
         </div>
 
         <div className="w-96">

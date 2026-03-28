@@ -10,6 +10,58 @@ interface MapCanvasProps {
   highlightedRegion?: number | null
 }
 
+interface CoordinateTransform {
+  toCanvas: (coords: LocationTuple) => LocationTuple
+  toLogical: (coords: LocationTuple) => LocationTuple
+}
+
+function getCoordinateTransform(
+  locations: LocationTuple[],
+  canvasWidth: number,
+  canvasHeight: number,
+): CoordinateTransform {
+  const padding = 40
+
+  const xValues = locations.map((location) => location[0])
+  const yValues = locations.map((location) => location[1])
+
+  const minX = xValues.length > 0 ? Math.min(...xValues) : 0
+  const maxX = xValues.length > 0 ? Math.max(...xValues) : 100
+  const minY = yValues.length > 0 ? Math.min(...yValues) : 0
+  const maxY = yValues.length > 0 ? Math.max(...yValues) : 100
+
+  const spanX = Math.max(maxX - minX, 0.00001)
+  const spanY = Math.max(maxY - minY, 0.00001)
+
+  const drawableWidth = Math.max(canvasWidth - padding * 2, 1)
+  const drawableHeight = Math.max(canvasHeight - padding * 2, 1)
+
+  const toCanvas = (coords: LocationTuple): LocationTuple => {
+    const normalizedX = (coords[0] - minX) / spanX
+    const normalizedY = (coords[1] - minY) / spanY
+
+    return [
+      padding + normalizedX * drawableWidth,
+      canvasHeight - (padding + normalizedY * drawableHeight),
+    ]
+  }
+
+  const toLogical = (coords: LocationTuple): LocationTuple => {
+    const normalizedX = (coords[0] - padding) / drawableWidth
+    const normalizedY = (canvasHeight - coords[1] - padding) / drawableHeight
+
+    return [
+      minX + normalizedX * spanX,
+      minY + normalizedY * spanY,
+    ]
+  }
+
+  return {
+    toCanvas,
+    toLogical,
+  }
+}
+
 function getRegionPolygon(regionIndices: RegionGroup, locations: LocationTuple[]): LocationTuple[] {
   const points = regionIndices
     .map((index) => locations[index])
@@ -49,14 +101,7 @@ export function MapCanvas({
 
     ctx.clearRect(0, 0, canvas.width, canvas.height)
 
-    const scale = Math.min(canvas.width, canvas.height) / 100
-    const offsetX = (canvas.width - 100 * scale) / 2
-    const offsetY = (canvas.height - 100 * scale) / 2
-
-    const toCanvas = (coords: [number, number]): [number, number] => [
-      coords[0] * scale + offsetX,
-      coords[1] * scale + offsetY,
-    ]
+    const { toCanvas } = getCoordinateTransform(locations, canvas.width, canvas.height)
 
     regions.forEach((regionIndices, regionIndex) => {
       const polygon = getRegionPolygon(regionIndices, locations)
@@ -128,12 +173,8 @@ export function MapCanvas({
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
 
-    const scale = Math.min(canvas.width, canvas.height) / 100
-    const offsetX = (canvas.width - 100 * scale) / 2
-    const offsetY = (canvas.height - 100 * scale) / 2
-
-    const logicalX = (x - offsetX) / scale
-    const logicalY = (y - offsetY) / scale
+    const { toLogical } = getCoordinateTransform(locations, canvas.width, canvas.height)
+    const [logicalX, logicalY] = toLogical([x, y])
 
     for (let regionIndex = 0; regionIndex < regions.length; regionIndex += 1) {
       const region = regions[regionIndex]
@@ -169,12 +210,8 @@ export function MapCanvas({
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
 
-    const scale = Math.min(canvas.width, canvas.height) / 100
-    const offsetX = (canvas.width - 100 * scale) / 2
-    const offsetY = (canvas.height - 100 * scale) / 2
-
-    const logicalX = (x - offsetX) / scale
-    const logicalY = (y - offsetY) / scale
+    const { toLogical } = getCoordinateTransform(locations, canvas.width, canvas.height)
+    const [logicalX, logicalY] = toLogical([x, y])
 
     for (let regionIndex = 0; regionIndex < regions.length; regionIndex += 1) {
       const region = regions[regionIndex]

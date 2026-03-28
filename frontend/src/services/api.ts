@@ -175,7 +175,9 @@ export async function connectRealtimeSession(options: ConnectOptions): Promise<S
 
   clientId = await waitForClientId
   options.onClientId(clientId)
-  await switchRole(clientId)
+  void switchRole(clientId).catch(() => {
+    options.onError?.('Role sync request failed, realtime stream is still active')
+  })
 
   if (currentLocation && socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(currentLocation))
