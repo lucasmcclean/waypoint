@@ -9,8 +9,7 @@ from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core import Document
 
-
-from messages.index import index
+from index import user_messages_index
 
 DATABASE_URL = os.getenv("DATABASE_URL", "uh oh")
 
@@ -66,7 +65,7 @@ def add_user_message(
         metadata.update(extra_metadata)
 
     doc = Document(text=content, metadata=metadata)
-    index.insert(doc)
+    user_messages_index.insert(doc)
 
 def query_user_messages(
     query_text: str,
@@ -99,7 +98,7 @@ def query_user_messages(
         filters.append({"key": "message_id", "value": postgis_filter_ids})
 
     retriever = VectorIndexRetriever(
-        index=index,
+        index=user_messages_index,
         similarity_top_k=top_k,
         filters=filters if filters else None
     )
