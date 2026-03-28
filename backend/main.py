@@ -3,12 +3,16 @@ from fastapi.middleware.cors import CORSMiddleware
 import json
 import uuid
 import asyncio
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from dotenv import load_dotenv
 import os
 
+from messages.user_message import query_user_messages
+from responders.responder import add_responder, update_responder
+from responders.responder_message import add_responder_message
+from users.user import add_user, update_user
 from users.user_message import add_user_message
 
 load_dotenv()
@@ -75,11 +79,37 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 async def broadcast_periodic():
+    loop = asyncio.get_running_loop()
     while True:
         await asyncio.sleep(5)
-        locations = [[1, 2], [2, 3], [3, 4]] #get all lcoations by selecting location column from users
-        regions = [[1, 2], [3]] # get regions using agents
-        await manager.broadcast(json.dumps({ "locations": locations, "regions": regions }))
+
+        def get_locations_sync():
+            db = SessionLocal()
+            try:
+                users_result = db.execute(text("""
+                    SELECT ST_Y(location::geometry) AS latitude,
+                           ST_X(location::geometry) AS longitude
+                    FROM users;
+                """))
+                users_locations = [list(row) for row in users_result]
+
+                responders_result = db.execute(text("""
+                    SELECT ST_Y(location::geometry) AS latitude,
+                           ST_X(location::geometry) AS longitude
+                    FROM responders;
+                """))
+                responders_locations = [list(row) for row in responders_result]
+
+                return users_locations, responders_locations
+            finally:
+                db.close()
+
+        users_locations, responders_locations = await loop.run_in_executor(None, get_locations_sync)
+
+        await manager.broadcast(json.dumps({
+            "users": users_locations,
+            "responders": responders_locations
+        }))
 
 @app.on_event("startup")
 async def startup_event():
@@ -90,31 +120,45 @@ async def websocket_endpoint(websocket: WebSocket):
     client_id = await manager.connect(websocket)
     await manager.send_personal_message(json.dumps({ "client_id": client_id }), client_id)
 
+    db = SessionLocal()
+
     try:
         while True:
             json_data = await websocket.receive_text()
             json_data = json_data.strip().strip("'").strip('"')
             location = json.loads(json_data)
             print(location)
-            # set location in the db
+            query = text("""
+                SELECT EXISTS (
+                SELECT 1 FROM users WHERE id = :client_id
+                )
+                """)
+    
+            result = db.execute(query, {"client_id": client_id}).scalar()
+            if result:
+                update_user(client_id, location["x"], location["y"])
+            else:
+                update_responder(client_id, location["x"], location["y"])
 
     except WebSocketDisconnect:
         manager.disconnect(client_id)
         await manager.broadcast(f"Client {client_id} disconnected")
+    finally:
+        db.close()
 
 @app.post("/switch")
-async def handle_switch(client_id: str = ""):
-    current_type = "User"  # get db type
-    if current_type == "User":
-        pass  # add a responder to the table with this client id
+async def handle_switch(client_id: str = "", role: str = "User"):
+    if role == "User":
+        add_user(client_id, 0, 0)
     else:
-        pass  # add a user to the table with this current client id
+        add_responder(client_id, 0, 0)
     return {"status": "switch handled"}
 
 @app.post("/query")
 async def handle_query(client_id: str = "", content: str = ""):
+    res = query_user_messages(content)
     # query the RAG
-    return {"content": "stuff"}
+    return {"content": res}
 
 @app.post("/message")
 async def handle_message(client_id: str = "", content: str = ""):
@@ -122,5 +166,6 @@ async def handle_message(client_id: str = "", content: str = ""):
     if current_type == "User":
         add_user_message(content, client_id)
     else:
+        add_responder_message(content, client_id)
         await manager.broadcast(json.dumps({ "responder_message": content }))
     return {"status": "message handled"}
