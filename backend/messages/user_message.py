@@ -1,0 +1,95 @@
+import os
+from datetime import datetime
+from typing import Dict, Any
+
+from geoalchemy2 import WKTElement
+from sqlalchemy import create_engine, text
+
+from llama_index.core.retrievers import VectorIndexRetriever
+from llama_index.core.query_engine import RetrieverQueryEngine
+from llama_index.core import Document
+
+from messages.index import index, llm
+
+DATABASE_URL = os.getenv("DATABASE_URL", "uh oh")
+
+engine = create_engine(DATABASE_URL)
+
+def add_user_message(
+    content: str,
+    user_id: str,
+    lat: float = None,
+    lon: float = None,
+    time: datetime = None,
+    extra_metadata: dict = None
+):
+    time = time or datetime.utcnow()
+
+    location_geom = WKTElement(f"POINT({lon} {lat})", srid=4326) if lat is not None and lon is not None else None
+
+    with engine.begin() as conn:
+        if location_geom:
+            conn.execute(
+                text(
+                    "INSERT INTO messages (user_id, content, time, location_geom) "
+                    "VALUES (:user_id, :content, :time, :location_geom)"
+                ),
+                {"user_id": user_id, "content": content, "time": time, "location_geom": location_geom}
+            )
+        else:
+            conn.execute(
+                text(
+                    "INSERT INTO messages (user_id, content, time) "
+                    "VALUES (:user_id, :content, :time)"
+                ),
+                {"user_id": user_id, "content": content, "time": time}
+            )
+
+    metadata = {"user_id": user_id, "time": time.isoformat()}
+    if lat is not None and lon is not None:
+        metadata.update({"lat": lat, "lon": lon})
+    if extra_metadata:
+        metadata.update(extra_metadata)
+
+    doc = Document(text=content, metadata=metadata)
+    index.insert(doc)
+
+def query_user_messages(
+    query_text: str,
+    top_k: int = 5,
+    user_id: str = None,
+    radius_meters: float = None,
+    lat: float = None,
+    lon: float = None,
+    extra_filters: Dict[str, Any] = None
+):
+    postgis_filter_ids = None
+    if radius_meters and lat is not None and lon is not None:
+        with engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "SELECT id FROM messages "
+                    "WHERE ST_DWithin(location_geom, ST_MakePoint(:lon, :lat)::geography, :radius)"
+                ),
+                {"lat": lat, "lon": lon, "radius": radius_meters}
+            )
+            postgis_filter_ids = [row[0] for row in result]
+
+    filters = []
+    if user_id:
+        filters.append({"key": "user_id", "value": user_id})
+    if extra_filters:
+        for k, v in extra_filters.items():
+            filters.append({"key": k, "value": v})
+    if postgis_filter_ids:
+        filters.append({"key": "message_id", "value": postgis_filter_ids})
+
+    retriever = VectorIndexRetriever(
+        index=index,
+        similarity_top_k=top_k,
+        vector_store_query_mode="hybrid",
+        filters=filters if filters else None
+    )
+
+    query_engine = RetrieverQueryEngine(retriever=retriever, llm=llm)
+    return query_engine.query(query_text)
