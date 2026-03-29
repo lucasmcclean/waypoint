@@ -83,7 +83,7 @@ export default function RoleSelector() {
                     <li>- Review selected region details</li>
                     <li>- Broadcast important notices</li>
                   </ul>
-                  <div className="btn-muted mt-6 inline-flex rounded-xl px-4 py-2.5 text-sm font-semibold">Enter as Responder</div>
+                  <div className="btn-danger mt-6 inline-flex rounded-xl px-4 py-2.5 text-sm font-semibold">Enter as Responder</div>
                 </article>
               </Link>
             </section>
