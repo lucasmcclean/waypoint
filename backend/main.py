@@ -155,15 +155,14 @@ async def handle_switch(client_id: str = "", role: str = "User"):
     return {"status": "switch handled"}
 
 @app.post("/query")
-async def handle_query(client_id: str = "", content: str = ""):
+def handle_query(client_id: str = "", content: str = ""):
     res = query_user_messages(content)
     # query the RAG
-    return {"content": res}
+    return {"content": res.response}
 
 @app.post("/message")
-async def handle_message(client_id: str = "", content: str = ""):
-    current_type = "User"  # get user type from db
-    if current_type == "User":
+async def handle_message(client_id: str = "", content: str = "", role: str = ""):
+    if role.lower() == "user":
         add_user_message(content, client_id)
     else:
         add_responder_message(content, client_id)

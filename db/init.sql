@@ -16,6 +16,7 @@ CREATE INDEX idx_user_messages_location ON user_messages USING GIST(location_geo
 
 CREATE TABLE responder_messages (
     id SERIAL PRIMARY KEY,
+    user_id TEXT,
     content TEXT,
     time TIMESTAMP DEFAULT NOW(),
     created_at TIMESTAMP DEFAULT NOW()
