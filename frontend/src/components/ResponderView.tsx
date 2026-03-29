@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from 'react'
-import { Shield, Search, MessageSquare } from 'lucide-react'
+import { Shield, Search, FileText, MessageSquare } from 'lucide-react'
 import { ChatPanel, type ChatMessage } from './ChatPanel'
 import { MapCanvas } from './MapCanvas'
 import {
   connectRealtimeSession,
   queryMessages,
+  requestRegionReport,
   sendMessage,
   type LocationTuple,
+  type RegionReport,
   type RegionPolygon,
   type SessionController,
 } from '../services/api'
@@ -44,6 +46,11 @@ export default function ResponderView() {
   const [queryText, setQueryText] = useState('')
   const [queryResult, setQueryResult] = useState('')
   const [isQuerying, setIsQuerying] = useState(false)
+  const [selectedRegionIndex, setSelectedRegionIndex] = useState<number | null>(null)
+  const [regionReport, setRegionReport] = useState<RegionReport | null>(null)
+  const [isLoadingRegionReport, setIsLoadingRegionReport] = useState(false)
+  const [regionReportError, setRegionReportError] = useState('')
+  const [isRegionReportModalOpen, setIsRegionReportModalOpen] = useState(false)
   const [locations, setLocations] = useState<LocationTuple[]>([])
   const [regions, setRegions] = useState<RegionPolygon[]>([])
   const [sessionController, setSessionController] = useState<SessionController | null>(null)
@@ -226,6 +233,23 @@ export default function ResponderView() {
     }
   }
 
+  const handleRegionClick = async (regionIndex: number) => {
+    setSelectedRegionIndex(regionIndex)
+    setRegionReport(null)
+    setRegionReportError('')
+    setIsRegionReportModalOpen(false)
+    setIsLoadingRegionReport(true)
+
+    try {
+      const report = await requestRegionReport(regionIndex)
+      setRegionReport(report)
+    } catch {
+      setRegionReportError('Region report is currently unavailable. Please try again shortly.')
+    } finally {
+      setIsLoadingRegionReport(false)
+    }
+  }
+
   return (
     <div className="h-screen flex flex-col bg-transparent">
       <header className="px-5 pt-5 md:px-6 md:pt-6">
@@ -293,6 +317,48 @@ export default function ResponderView() {
               )}
             </div>
 
+            <div className="panel-glass rounded-2xl p-4 min-h-0 flex flex-col">
+              <div className="flex items-center gap-2 mb-3">
+                <FileText className="text-[var(--brand)]" size={18} />
+                <h3 className="section-title font-semibold">Region Report</h3>
+              </div>
+
+              {selectedRegionIndex === null ? (
+                <p className="text-sm text-[var(--text-muted)]">Shift+click or right-click any region on the map to generate a report.</p>
+              ) : (
+                <div className="space-y-2">
+                  <div className="soft-label">Selected region</div>
+                  <p className="text-sm font-semibold text-[var(--text-strong)]">Region {selectedRegionIndex + 1}</p>
+
+                  {isLoadingRegionReport && (
+                    <p className="text-sm text-[var(--text-muted)]">Generating region report...</p>
+                  )}
+
+                  {!isLoadingRegionReport && regionReportError && (
+                    <p className="text-sm text-[var(--danger)]">{regionReportError}</p>
+                  )}
+
+                  {!isLoadingRegionReport && regionReport && (
+                    <>
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs text-[var(--text-muted)]">Matched users: {regionReport.matchedUserCount}</p>
+                        <button
+                          type="button"
+                          onClick={() => setIsRegionReportModalOpen(true)}
+                          className="btn-muted rounded-md px-2.5 py-1 text-[11px] font-semibold"
+                        >
+                          Open full report
+                        </button>
+                      </div>
+                      <div className="max-h-56 md:max-h-72 overflow-y-auto rounded-lg border border-[var(--border-soft)] bg-[rgba(8,16,29,0.72)] p-3 text-sm leading-7 text-[var(--text-primary)] whitespace-pre-wrap break-words">
+                        {regionReport.report || 'No report text returned.'}
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
           </aside>
 
           <section className="panel-glass rounded-2xl p-4 md:p-5 flex flex-col overflow-hidden">
@@ -311,7 +377,11 @@ export default function ResponderView() {
             </div>
 
             <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-[var(--border-soft)] bg-[rgba(8,16,29,0.75)] p-2">
-              <MapCanvas locations={locations} regions={regions} />
+              <MapCanvas
+                locations={locations}
+                regions={regions}
+                onRegionClick={handleRegionClick}
+              />
             </div>
 
             <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
@@ -345,6 +415,31 @@ export default function ResponderView() {
           </aside>
         </div>
       </div>
+
+      {isRegionReportModalOpen && regionReport && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-[rgba(3,8,15,0.75)] p-4">
+          <div className="panel-glass w-full max-w-4xl max-h-[88vh] rounded-2xl p-5 flex flex-col">
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <div>
+                <div className="soft-label">Region report</div>
+                <h3 className="text-lg font-semibold text-[var(--text-strong)]">Region {regionReport.regionId + 1}</h3>
+                <p className="text-xs text-[var(--text-muted)] mt-1">Matched users: {regionReport.matchedUserCount}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsRegionReportModalOpen(false)}
+                className="btn-muted rounded-md px-3 py-1.5 text-xs font-semibold"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto rounded-lg border border-[var(--border-soft)] bg-[rgba(8,16,29,0.72)] p-4 text-sm leading-7 text-[var(--text-primary)] whitespace-pre-wrap break-words">
+              {regionReport.report || 'No report text returned.'}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

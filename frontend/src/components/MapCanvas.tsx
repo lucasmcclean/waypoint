@@ -8,6 +8,7 @@ export type LocationTuple = [number, number, number?]
 interface MapCanvasProps {
   locations: LocationTuple[]
   regions?: RegionPolygon[]
+  onRegionClick?: (regionIndex: number) => void
 }
 
 const TAMPA_BOUNDS: LngLatBoundsLike = [[-82.62, 27.82], [-82.24, 28.19]]
@@ -142,6 +143,18 @@ function pointSquare(lng: number, lat: number, halfSize: number): [number, numbe
   ]
 }
 
+function pointCircle(lng: number, lat: number, radius: number, segments: number = 24): [number, number][] {
+  const ring: [number, number][] = []
+  for (let index = 0; index < segments; index += 1) {
+    const theta = (index / segments) * Math.PI * 2
+    ring.push([
+      lng + Math.cos(theta) * radius,
+      lat + Math.sin(theta) * radius,
+    ])
+  }
+  return closeRing(ring)
+}
+
 function twoPointBuffer(points: [number, number][], halfSize: number): [number, number][] {
   const [a, b] = points
   return [
@@ -152,26 +165,63 @@ function twoPointBuffer(points: [number, number][], halfSize: number): [number, 
   ]
 }
 
+function expandRing(points: [number, number][], expansion: number): [number, number][] {
+  if (points.length < 4) return points
+
+  const ring = closeRing(points)
+  const openRing = ring.slice(0, -1)
+  if (openRing.length < 3) return ring
+
+  const centroid: [number, number] = [
+    openRing.reduce((sum, point) => sum + point[0], 0) / openRing.length,
+    openRing.reduce((sum, point) => sum + point[1], 0) / openRing.length,
+  ]
+
+  const expandedOpenRing = openRing.map((point) => {
+    const dx = point[0] - centroid[0]
+    const dy = point[1] - centroid[1]
+    const distance = Math.hypot(dx, dy)
+    if (distance < 1e-9) return [point[0] + expansion, point[1]] as [number, number]
+
+    const scale = (distance + expansion) / distance
+    return [
+      centroid[0] + dx * scale,
+      centroid[1] + dy * scale,
+    ] as [number, number]
+  })
+
+  return closeRing(expandedOpenRing)
+}
+
 function buildRegionRing(regionPoints: Array<[number, number]>): [number, number][] {
+  const regionExpansion = 0.003
+  const singlePointRadius = 0.0012
   const validPoints = regionPoints
     .filter((point) => Number.isFinite(point[0]) && Number.isFinite(point[1]))
     .map((point) => normalizeToLngLat(point))
 
   if (validPoints.length === 0) return []
-  if (validPoints.length === 1) return closeRing(pointSquare(validPoints[0][0], validPoints[0][1], 0.0045))
-  if (validPoints.length === 2) return closeRing(twoPointBuffer(validPoints, 0.0035))
+  if (validPoints.length === 1) {
+    return pointCircle(validPoints[0][0], validPoints[0][1], singlePointRadius)
+  }
+  if (validPoints.length === 2) {
+    return expandRing(closeRing(twoPointBuffer(validPoints, 0.0035)), regionExpansion)
+  }
 
   const hull = convexHull(validPoints)
-  if (hull.length < 3) return closeRing(twoPointBuffer(validPoints.slice(0, 2), 0.0035))
-  return closeRing(hull)
+  if (hull.length < 3) {
+    return expandRing(closeRing(twoPointBuffer(validPoints.slice(0, 2), 0.0035)), regionExpansion)
+  }
+  return expandRing(closeRing(hull), regionExpansion)
 }
 
-export function MapCanvas({ locations, regions = [] }: MapCanvasProps) {
+export function MapCanvas({ locations, regions = [], onRegionClick }: MapCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<maplibregl.Map | null>(null)
   const hoveredFeatureIdRef = useRef<number | string | null>(null)
   const hoveredPointIndexRef = useRef<number | null>(null)
   const pointPopupRef = useRef<maplibregl.Popup | null>(null)
+  const onRegionClickRef = useRef<MapCanvasProps['onRegionClick']>(onRegionClick)
   const latestPointsGeoJsonRef = useRef<GeoJSON.FeatureCollection<GeoJSON.Point>>({
     type: 'FeatureCollection',
     features: [],
@@ -259,6 +309,10 @@ export function MapCanvas({ locations, regions = [] }: MapCanvasProps) {
       }),
     }
   }, [regionVisuals])
+
+  useEffect(() => {
+    onRegionClickRef.current = onRegionClick
+  }, [onRegionClick])
 
   useEffect(() => {
     latestPointsGeoJsonRef.current = pointsGeoJson
@@ -448,6 +502,32 @@ export function MapCanvas({ locations, regions = [] }: MapCanvasProps) {
           map.setFeatureState({ source: 'regions', id: hoveredFeatureIdRef.current }, { hover: false })
           hoveredFeatureIdRef.current = null
         }
+      })
+
+      const triggerRegionSelection = (event: maplibregl.MapMouseEvent & { features?: MapGeoJSONFeature[] }) => {
+        const handler = onRegionClickRef.current
+        if (!handler) return
+
+        event.preventDefault()
+
+        const feature = event.features?.[0] as MapGeoJSONFeature | undefined
+        if (!feature) return
+
+        const regionIndexValue = feature.properties?.regionIndex
+        const regionIndex = typeof regionIndexValue === 'number'
+          ? regionIndexValue
+          : Number(regionIndexValue)
+
+        if (!Number.isInteger(regionIndex) || regionIndex < 0) return
+        handler(regionIndex)
+      }
+
+      map.on('contextmenu', 'regions-fill', triggerRegionSelection)
+
+      map.on('click', 'regions-fill', (event) => {
+        const nativeEvent = event.originalEvent as MouseEvent | undefined
+        if (!nativeEvent?.shiftKey) return
+        triggerRegionSelection(event as maplibregl.MapMouseEvent & { features?: MapGeoJSONFeature[] })
       })
 
       map.on('mouseenter', 'points-circles', () => {

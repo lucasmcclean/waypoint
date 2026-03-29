@@ -1,8 +1,9 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import json
 import uuid
 import asyncio
+from math import sqrt
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
 
@@ -105,6 +106,112 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 client_roles: dict[str, str] = {}
+latest_regions: list[list[list[float]]] = []
+regions_lock = asyncio.Lock()
+
+
+def _deep_copy_regions(regions: list[list[list[float]]]) -> list[list[list[float]]]:
+    return [
+        [[float(point[0]), float(point[1]), float(point[2])] for point in region]
+        for region in regions
+    ]
+
+
+def _distance(a: tuple[float, float], b: tuple[float, float]) -> float:
+    return sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2)
+
+
+def _cross(origin: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
+    return (a[0] - origin[0]) * (b[1] - origin[1]) - (a[1] - origin[1]) * (b[0] - origin[0])
+
+
+def _convex_hull(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    unique_points = sorted(set(points))
+    if len(unique_points) <= 2:
+        return unique_points
+
+    lower: list[tuple[float, float]] = []
+    for point in unique_points:
+        while len(lower) >= 2 and _cross(lower[-2], lower[-1], point) <= 0:
+            lower.pop()
+        lower.append(point)
+
+    upper: list[tuple[float, float]] = []
+    for point in reversed(unique_points):
+        while len(upper) >= 2 and _cross(upper[-2], upper[-1], point) <= 0:
+            upper.pop()
+        upper.append(point)
+
+    return lower[:-1] + upper[:-1]
+
+
+def _distance_point_to_segment(
+    point: tuple[float, float],
+    seg_a: tuple[float, float],
+    seg_b: tuple[float, float],
+) -> float:
+    ab_x = seg_b[0] - seg_a[0]
+    ab_y = seg_b[1] - seg_a[1]
+    ap_x = point[0] - seg_a[0]
+    ap_y = point[1] - seg_a[1]
+    denom = ab_x * ab_x + ab_y * ab_y
+    if denom == 0:
+        return _distance(point, seg_a)
+
+    t = max(0.0, min(1.0, (ap_x * ab_x + ap_y * ab_y) / denom))
+    closest = (seg_a[0] + t * ab_x, seg_a[1] + t * ab_y)
+    return _distance(point, closest)
+
+
+def _point_in_polygon(point: tuple[float, float], polygon: list[tuple[float, float]]) -> bool:
+    if len(polygon) < 3:
+        return False
+
+    x, y = point
+    inside = False
+    j = len(polygon) - 1
+    for i in range(len(polygon)):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+
+        intersects = (yi > y) != (yj > y)
+        if intersects:
+            x_at_y = (xj - xi) * (y - yi) / (yj - yi) + xi
+            if x < x_at_y:
+                inside = not inside
+        j = i
+
+    return inside
+
+
+def _is_point_inside_region(lat: float, lon: float, region: list[list[float]]) -> bool:
+    candidate = (float(lon), float(lat))
+    region_points = [(float(point[1]), float(point[0])) for point in region if len(point) >= 2]
+    if not region_points:
+        return False
+
+    tolerance = 0.0035
+    unique_points = list(dict.fromkeys(region_points))
+    if len(unique_points) == 1:
+        return _distance(candidate, unique_points[0]) <= tolerance
+
+    if len(unique_points) == 2:
+        return _distance_point_to_segment(candidate, unique_points[0], unique_points[1]) <= tolerance
+
+    hull = _convex_hull(unique_points)
+    if len(hull) < 3:
+        return _distance_point_to_segment(candidate, unique_points[0], unique_points[1]) <= tolerance
+
+    if _point_in_polygon(candidate, hull):
+        return True
+
+    for index in range(len(hull)):
+        seg_a = hull[index]
+        seg_b = hull[(index + 1) % len(hull)]
+        if _distance_point_to_segment(candidate, seg_a, seg_b) <= tolerance:
+            return True
+
+    return False
 
 async def broadcast_periodic():
     loop = asyncio.get_running_loop()
@@ -163,6 +270,11 @@ async def broadcast_periodic():
 
         try:
             locations, regions, debug = await loop.run_in_executor(None, get_locations_sync)
+
+            global latest_regions
+            async with regions_lock:
+                latest_regions = _deep_copy_regions(regions)
+
             await manager.broadcast(json.dumps({
                 "locations": locations,
                 "regions": regions,
@@ -267,25 +379,57 @@ async def handle_switch(client_id: str = "", role: str = "User"):
     client_roles[client_id] = role_lower
     return {"status": "switch handled"}
 
-# @app.post("/report")
-# async def get_summary_for_users(user_ids: int = 0, db = Depends(get_db)):
-#     polygon = regions[region_id]
-#     query = text("""
-#         SELECT ST_Y(location_geom::geometry) AS latitude,
-#                ST_X(location_geom::geometry) AS longitude,
-#                id
-#         FROM users;
-#     """)
-#     
-#     users_result = db.execute(query).mappings().all()
-#     
-#     users_inside = []
-#     for user in users_result:
-#         if is_point_in_polygon(user['latitude'], user['longitude'], polygon):
-#             users_inside.append(user["id"])
-#
-#     res = query_user_messages("Make a summary", user_id=users_inside)
-#     return res.response
+@app.post("/report")
+async def get_summary_for_region(region_id: int = 0, prompt: str = "", db: Session = Depends(get_db)):
+    async with regions_lock:
+        regions_snapshot = _deep_copy_regions(latest_regions)
+
+    if region_id < 0 or region_id >= len(regions_snapshot):
+        raise HTTPException(status_code=404, detail="Region not found")
+
+    selected_region = regions_snapshot[region_id]
+
+    users_result = db.execute(text("""
+        SELECT id,
+               ST_Y(location_geom::geometry) AS latitude,
+               ST_X(location_geom::geometry) AS longitude
+        FROM users
+        WHERE location_geom IS NOT NULL;
+    """)).mappings().all()
+
+    matched_user_ids: list[str] = []
+    for user in users_result:
+        lat = user.latitude
+        lon = user.longitude
+        if lat is None or lon is None:
+            continue
+        if _is_point_inside_region(float(lat), float(lon), selected_region):
+            matched_user_ids.append(str(user.id))
+
+    if len(matched_user_ids) == 0:
+        return {
+            "region_id": region_id,
+            "matched_user_ids": [],
+            "matched_user_count": 0,
+            "report": "No users were found in this region.",
+        }
+
+    report_prompt = prompt.strip() or (
+        "Generate a concise operational situation report for these users in this region. "
+        "Include immediate risks, recurring themes, and recommended responder actions."
+    )
+
+    res = await query_user_messages(report_prompt, user_id=matched_user_ids)
+
+    if res.response.lower().strip() == "empty response":
+        res.response = "Can not generate report since there are no messages"
+
+    return {
+        "region_id": region_id,
+        "matched_user_ids": matched_user_ids,
+        "matched_user_count": len(matched_user_ids),
+        "report": res.response,
+    }
 
 def get_user_messages(client_id: str = "", user_id: str = "", db: Session = Depends(get_db)):
     sql = text("SELECT * FROM user_messages WHERE user_id = :user_id")

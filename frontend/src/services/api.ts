@@ -51,6 +51,13 @@ export interface SessionController {
   sendLocation: (location: LocationTuple) => void
 }
 
+export interface RegionReport {
+  regionId: number
+  matchedUserIds: string[]
+  matchedUserCount: number
+  report: string
+}
+
 interface ConnectOptions {
   role: Role
   location?: LocationTuple | null
@@ -304,6 +311,38 @@ export async function queryMessages(clientId: string, content: string): Promise<
 
   const json = await response.json() as { content?: string }
   return typeof json.content === 'string' ? json.content : ''
+}
+
+export async function requestRegionReport(regionId: number, prompt?: string): Promise<RegionReport> {
+  const queryParams = new URLSearchParams()
+  queryParams.set('region_id', String(regionId))
+  if (prompt && prompt.trim()) {
+    queryParams.set('prompt', prompt.trim())
+  }
+
+  const response = await fetch(`${API_BASE_URL}/report?${queryParams.toString()}`, {
+    method: 'POST',
+  })
+
+  if (!response.ok) {
+    throw new Error(`Report request failed (${response.status})`)
+  }
+
+  const json = await response.json() as {
+    region_id?: unknown
+    matched_user_ids?: unknown
+    matched_user_count?: unknown
+    report?: unknown
+  }
+
+  return {
+    regionId: Number(json.region_id ?? regionId),
+    matchedUserIds: Array.isArray(json.matched_user_ids)
+      ? json.matched_user_ids.map((id) => String(id))
+      : [],
+    matchedUserCount: Number(json.matched_user_count ?? 0),
+    report: typeof json.report === 'string' ? json.report : '',
+  }
 }
 
 export async function connectRealtimeSession(options: ConnectOptions): Promise<SessionController> {
