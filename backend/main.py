@@ -13,7 +13,7 @@ from responders.responder import add_responder, update_responder
 from responders.responder_message import add_responder_message
 from users.user import add_user, update_user
 from users.user_message import add_user_message, query_user_messages
-from regions.region_gen import compute_priority_polygons, is_point_in_polygon
+from regions.region_gen import group_points_into_regions
 
 load_dotenv()
 
@@ -106,7 +106,7 @@ async def broadcast_periodic():
                 all_locations = [[row.latitude, row.longitude, 0] for row in users_result] + [[row.latitude, row.longitude, 1] for row in responders_result]
 
                 points = [[row.latitude, row.longitude, row.priority] for row in users_result]
-                regions = compute_priority_polygons(points)
+                regions = group_points_into_regions(points)
 
                 return all_locations, regions
             finally:
@@ -160,25 +160,25 @@ async def handle_switch(client_id: str = "", role: str = "User"):
         add_responder(client_id, 0, 0)
     return {"status": "switch handled"}
 
-@app.post("/report")
-async def get_users_in_polygon(region_id: int = 0, db = Depends(get_db)):
-    polygon = regions[region_id]
-    query = text("""
-        SELECT ST_Y(location_geom::geometry) AS latitude,
-               ST_X(location_geom::geometry) AS longitude,
-               id
-        FROM users;
-    """)
-    
-    users_result = db.execute(query).mappings().all()
-    
-    users_inside = []
-    for user in users_result:
-        if is_point_in_polygon(user['latitude'], user['longitude'], polygon):
-            users_inside.append(user["id"])
-
-    res = query_user_messages("Make a summary", user_id=users_inside)
-    return res.response
+# @app.post("/report")
+# async def get_summary_for_users(user_ids: int = 0, db = Depends(get_db)):
+#     polygon = regions[region_id]
+#     query = text("""
+#         SELECT ST_Y(location_geom::geometry) AS latitude,
+#                ST_X(location_geom::geometry) AS longitude,
+#                id
+#         FROM users;
+#     """)
+#     
+#     users_result = db.execute(query).mappings().all()
+#     
+#     users_inside = []
+#     for user in users_result:
+#         if is_point_in_polygon(user['latitude'], user['longitude'], polygon):
+#             users_inside.append(user["id"])
+#
+#     res = query_user_messages("Make a summary", user_id=users_inside)
+#     return res.response
 
 def get_user_messages(client_id: str = "", user_id: str = "", db: Session = Depends(get_db)):
     sql = text("SELECT * FROM user_messages WHERE user_id = :user_id")
