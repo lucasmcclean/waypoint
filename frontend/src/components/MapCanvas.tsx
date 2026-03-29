@@ -200,6 +200,28 @@ function getMaxPairDistance(points: [number, number][]): number {
   return maxDistance
 }
 
+function buildCircleRingFromPoints(
+  points: [number, number][],
+  minRadius: number,
+  padding: number,
+  segments: number,
+): [number, number][] {
+  if (points.length === 0) return []
+
+  const centroid: [number, number] = [
+    points.reduce((sum, point) => sum + point[0], 0) / points.length,
+    points.reduce((sum, point) => sum + point[1], 0) / points.length,
+  ]
+
+  const maxDistanceFromCenter = points.reduce((maxDistance, point) => {
+    const distance = Math.hypot(point[0] - centroid[0], point[1] - centroid[1])
+    return Math.max(maxDistance, distance)
+  }, 0)
+
+  const radius = Math.max(minRadius, maxDistanceFromCenter + padding)
+  return pointCircle(centroid[0], centroid[1], radius, segments)
+}
+
 function expandRing(points: [number, number][], expansion: number): [number, number][] {
   if (points.length < 4) return points
 
@@ -229,10 +251,10 @@ function expandRing(points: [number, number][], expansion: number): [number, num
 }
 
 function buildRegionRing(regionPoints: Array<[number, number]>): [number, number][] {
-  const regionExpansion = 0.003
   const singlePointRadius = 0.001
   const dedupeEpsilon = 0.00008
-  const nearPairThreshold = 0.00045
+  const circlePadding = 0.00045
+  const circleSegments = 32
   const validPoints = regionPoints
     .filter((point) => Number.isFinite(point[0]) && Number.isFinite(point[1]))
     .map((point) => normalizeToLngLat(point))
@@ -240,30 +262,7 @@ function buildRegionRing(regionPoints: Array<[number, number]>): [number, number
   const uniquePoints = dedupePoints(validPoints, dedupeEpsilon)
 
   if (uniquePoints.length === 0) return []
-  if (uniquePoints.length === 1) {
-    return pointCircle(uniquePoints[0][0], uniquePoints[0][1], singlePointRadius)
-  }
-
-  if (uniquePoints.length === 2) {
-    const pairDistance = getMaxPairDistance(uniquePoints)
-    if (pairDistance <= nearPairThreshold) {
-      return pointCircle(uniquePoints[0][0], uniquePoints[0][1], singlePointRadius)
-    }
-    return closeRing(twoPointBuffer(uniquePoints, 0.0026))
-  }
-
-  const hull = convexHull(uniquePoints)
-  if (hull.length < 3) {
-    const pairDistance = getMaxPairDistance(uniquePoints)
-    if (pairDistance <= nearPairThreshold) {
-      return pointCircle(uniquePoints[0][0], uniquePoints[0][1], singlePointRadius)
-    }
-    return closeRing(twoPointBuffer(uniquePoints.slice(0, 2), 0.0026))
-  }
-
-  const footprint = getMaxPairDistance(hull)
-  const dynamicExpansion = footprint <= 0.006 ? 0.0012 : regionExpansion
-  return expandRing(closeRing(hull), dynamicExpansion)
+  return buildCircleRingFromPoints(uniquePoints, singlePointRadius, circlePadding, circleSegments)
 }
 
 function getFeatureLocationIndex(feature: GeoJSON.Feature<GeoJSON.Point>): number | null {

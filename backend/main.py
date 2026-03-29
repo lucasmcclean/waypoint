@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import json
 import uuid
 import asyncio
+import random
 from math import sqrt
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base, Session
@@ -13,7 +14,7 @@ import os
 from responders.responder import add_responder, update_responder
 from responders.responder_message import add_responder_message
 from users.user import add_user, upsert_user
-from users.user_message import add_user_message, query_user_messages
+from users.user_message import add_user_message, add_simulated_user_message, query_user_messages
 from regions.region_gen import group_points_into_regions
 
 load_dotenv()
@@ -34,6 +35,52 @@ Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
+SIM_USER_PREFIX = "sim-user-"
+SIM_RESPONDER_PREFIX = "sim-responder-"
+TAMPA_MIN_LAT = 27.82
+TAMPA_MAX_LAT = 28.19
+TAMPA_MIN_LON = -82.62
+TAMPA_MAX_LON = -82.24
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except Exception:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except Exception:
+        return default
+
+
+ENABLE_DEV_SIMULATION = _env_bool("ENABLE_DEV_SIMULATION", True)
+SIM_CLEANUP_ON_START = _env_bool("SIM_CLEANUP_ON_START", True)
+SIM_TICK_SECONDS = max(0.05, _env_float("SIM_TICK_SECONDS", 0.2))
+SIM_MIN_USERS = max(0, _env_int("SIM_MIN_USERS", 10))
+SIM_MAX_USERS = max(SIM_MIN_USERS, _env_int("SIM_MAX_USERS", 24))
+SIM_MIN_RESPONDERS = max(0, _env_int("SIM_MIN_RESPONDERS", 3))
+SIM_MAX_RESPONDERS = max(SIM_MIN_RESPONDERS, _env_int("SIM_MAX_RESPONDERS", 10))
+SIM_SPAWN_PROB = min(1.0, max(0.0, _env_float("SIM_SPAWN_PROB", 0.01)))
+SIM_MOVE_PROB = min(1.0, max(0.0, _env_float("SIM_MOVE_PROB", 0.2)))
+SIM_MESSAGE_PROB = min(1.0, max(0.0, _env_float("SIM_MESSAGE_PROB", 0.05)))
+
 def _is_zero_point(lat: float, lon: float) -> bool:
     return abs(lat) < 1e-9 and abs(lon) < 1e-9
 
@@ -52,6 +99,38 @@ def _is_valid_map_point(lat: float, lon: float) -> bool:
     if _is_zero_point(lat_f, lon_f):
         return False
     return True
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(value, upper))
+
+
+def _random_tampa_point() -> tuple[float, float]:
+    lat = random.uniform(TAMPA_MIN_LAT, TAMPA_MAX_LAT)
+    lon = random.uniform(TAMPA_MIN_LON, TAMPA_MAX_LON)
+    return lat, lon
+
+
+def _random_sim_user_id() -> str:
+    return f"{SIM_USER_PREFIX}{uuid.uuid4()}"
+
+
+def _random_sim_responder_id() -> str:
+    return f"{SIM_RESPONDER_PREFIX}{uuid.uuid4()}"
+
+
+SIMULATED_MESSAGE_TEMPLATES = [
+    "Water is rising near our building and the first floor is taking on water.",
+    "Power is out in this block and we need assistance with medical equipment.",
+    "A road is flooded and several people are stranded without transport.",
+    "We can smell gas near the intersection and residents are evacuating.",
+    "Elderly neighbors need help moving to a safer location.",
+    "Supplies are running low and families nearby need drinking water.",
+    "Debris is blocking the street and emergency vehicles cannot pass.",
+    "Multiple homes reported roof damage after the storm passed through.",
+    "Phone signal is unstable and we cannot reach nearby responders reliably.",
+    "Flash flooding just started and we need urgent evacuation guidance.",
+]
 
 def get_db():
     db = SessionLocal()
@@ -213,6 +292,165 @@ def _is_point_inside_region(lat: float, lon: float, region: list[list[float]]) -
 
     return False
 
+
+def _cleanup_simulated_data_sync():
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM user_messages WHERE user_id LIKE :prefix"), {"prefix": f"{SIM_USER_PREFIX}%"})
+        conn.execute(text("DELETE FROM responder_messages WHERE user_id LIKE :prefix"), {"prefix": f"{SIM_RESPONDER_PREFIX}%"})
+        conn.execute(text("DELETE FROM users WHERE id LIKE :prefix"), {"prefix": f"{SIM_USER_PREFIX}%"})
+        conn.execute(text("DELETE FROM responders WHERE id LIKE :prefix"), {"prefix": f"{SIM_RESPONDER_PREFIX}%"})
+
+
+def _run_simulation_step_sync():
+    with engine.begin() as conn:
+        sim_users = conn.execute(text("""
+            SELECT id,
+                   ST_Y(location_geom::geometry) AS latitude,
+                   ST_X(location_geom::geometry) AS longitude,
+                   priority
+            FROM users
+            WHERE id LIKE :prefix AND location_geom IS NOT NULL
+        """), {"prefix": f"{SIM_USER_PREFIX}%"}).mappings().all()
+
+        sim_responders = conn.execute(text("""
+            SELECT id,
+                   ST_Y(location_geom::geometry) AS latitude,
+                   ST_X(location_geom::geometry) AS longitude
+            FROM responders
+            WHERE id LIKE :prefix AND location_geom IS NOT NULL
+        """), {"prefix": f"{SIM_RESPONDER_PREFIX}%"}).mappings().all()
+
+        users = [
+            {
+                "id": str(row.id),
+                "latitude": float(row.latitude),
+                "longitude": float(row.longitude),
+                "priority": int(row.priority) if row.priority is not None else 0,
+            }
+            for row in sim_users
+            if _is_valid_map_point(row.latitude, row.longitude)
+        ]
+
+        responders = [
+            {
+                "id": str(row.id),
+                "latitude": float(row.latitude),
+                "longitude": float(row.longitude),
+            }
+            for row in sim_responders
+            if _is_valid_map_point(row.latitude, row.longitude)
+        ]
+
+        while len(users) < SIM_MIN_USERS:
+            user_id = _random_sim_user_id()
+            lat, lon = _random_tampa_point()
+            conn.execute(text("""
+                INSERT INTO users (id, priority, location_geom)
+                VALUES (
+                    :id,
+                    0,
+                    ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography
+                )
+                ON CONFLICT (id) DO NOTHING
+            """), {"id": user_id, "lat": lat, "lon": lon})
+            users.append({"id": user_id, "latitude": lat, "longitude": lon, "priority": 0})
+
+        while len(responders) < SIM_MIN_RESPONDERS:
+            responder_id = _random_sim_responder_id()
+            lat, lon = _random_tampa_point()
+            conn.execute(text("""
+                INSERT INTO responders (id, location_geom)
+                VALUES (
+                    :id,
+                    ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography
+                )
+                ON CONFLICT (id) DO NOTHING
+            """), {"id": responder_id, "lat": lat, "lon": lon})
+            responders.append({"id": responder_id, "latitude": lat, "longitude": lon})
+
+        if len(users) < SIM_MAX_USERS and random.random() < SIM_SPAWN_PROB:
+            user_id = _random_sim_user_id()
+            lat, lon = _random_tampa_point()
+            conn.execute(text("""
+                INSERT INTO users (id, priority, location_geom)
+                VALUES (
+                    :id,
+                    0,
+                    ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography
+                )
+                ON CONFLICT (id) DO NOTHING
+            """), {"id": user_id, "lat": lat, "lon": lon})
+            users.append({"id": user_id, "latitude": lat, "longitude": lon, "priority": 0})
+
+        if len(responders) < SIM_MAX_RESPONDERS and random.random() < SIM_SPAWN_PROB * 0.75:
+            responder_id = _random_sim_responder_id()
+            lat, lon = _random_tampa_point()
+            conn.execute(text("""
+                INSERT INTO responders (id, location_geom)
+                VALUES (
+                    :id,
+                    ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography
+                )
+                ON CONFLICT (id) DO NOTHING
+            """), {"id": responder_id, "lat": lat, "lon": lon})
+            responders.append({"id": responder_id, "latitude": lat, "longitude": lon})
+
+        for user in users:
+            if random.random() > SIM_MOVE_PROB:
+                continue
+            next_lat = _clamp(user["latitude"] + random.uniform(-0.00012, 0.00012), TAMPA_MIN_LAT, TAMPA_MAX_LAT)
+            next_lon = _clamp(user["longitude"] + random.uniform(-0.00012, 0.00012), TAMPA_MIN_LON, TAMPA_MAX_LON)
+            conn.execute(text("""
+                UPDATE users
+                SET location_geom = ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography
+                WHERE id = :id AND id LIKE :prefix
+            """), {"id": user["id"], "lat": next_lat, "lon": next_lon, "prefix": f"{SIM_USER_PREFIX}%"})
+            user["latitude"] = next_lat
+            user["longitude"] = next_lon
+
+        for responder in responders:
+            if random.random() > SIM_MOVE_PROB:
+                continue
+            next_lat = _clamp(responder["latitude"] + random.uniform(-0.00014, 0.00014), TAMPA_MIN_LAT, TAMPA_MAX_LAT)
+            next_lon = _clamp(responder["longitude"] + random.uniform(-0.00014, 0.00014), TAMPA_MIN_LON, TAMPA_MAX_LON)
+            conn.execute(text("""
+                UPDATE responders
+                SET location_geom = ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography
+                WHERE id = :id AND id LIKE :prefix
+            """), {"id": responder["id"], "lat": next_lat, "lon": next_lon, "prefix": f"{SIM_RESPONDER_PREFIX}%"})
+            responder["latitude"] = next_lat
+            responder["longitude"] = next_lon
+
+    if users and random.random() < SIM_MESSAGE_PROB:
+        selected = random.choice(users)
+        generated_priority = random.randint(0, 10)
+        content = random.choice(SIMULATED_MESSAGE_TEMPLATES)
+        add_simulated_user_message(
+            content=content,
+            user_id=selected["id"],
+            priority=generated_priority,
+            lat=selected["latitude"],
+            lon=selected["longitude"],
+            extra_metadata={"simulated": True},
+        )
+
+
+async def simulation_periodic():
+    if not ENABLE_DEV_SIMULATION:
+        return
+
+    loop = asyncio.get_running_loop()
+
+    if SIM_CLEANUP_ON_START:
+        await loop.run_in_executor(None, _cleanup_simulated_data_sync)
+
+    while True:
+        await asyncio.sleep(SIM_TICK_SECONDS)
+        try:
+            await loop.run_in_executor(None, _run_simulation_step_sync)
+        except Exception as error:
+            print(f"simulation_periodic error: {error}")
+
 async def broadcast_periodic():
     loop = asyncio.get_running_loop()
 
@@ -305,6 +543,8 @@ async def broadcast_periodic():
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(broadcast_periodic())
+    if ENABLE_DEV_SIMULATION:
+        asyncio.create_task(simulation_periodic())
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
