@@ -21,7 +21,7 @@ def add_user(id: str, lat: float, lon: float,):
             {"id": id, "lat": lat, "lon": lon}
         )
 
-def update_user(id: int, lat: float, lon: float):
+def update_user(id: int, lat: float, lon: float, priority: int = None):
     with engine.begin() as conn:
         conn.execute(
             text(

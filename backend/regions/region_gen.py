@@ -73,6 +73,36 @@ def priority_polygons(points, high_priority_threshold=0.7, min_region_size=3, ma
 
     return polygons
 
+def get_ids_inside_polygon(indices, data_array):
+    """
+    indices: list of ints — indices into data_array that form the polygon
+    data_array: list of [x, y, id, ...] entries
+    returns: list of ids whose points fall inside the polygon
+    """
+    polygon = [(data_array[i][0], data_array[i][1]) for i in indices]
+
+    return [
+        point[2]
+        for point in data_array
+        if is_inside_polygon(point[0], point[1], polygon)
+    ]
+
+def is_inside_polygon(x, y, polygon):
+    n = len(polygon)
+    inside = False
+    j = n - 1
+
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+
+        j = i
+
+    return inside
+
 
 def order_polygon_vertices(indices, coords):
     """

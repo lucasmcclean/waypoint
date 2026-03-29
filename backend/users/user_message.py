@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, text
 from llama_index.core.retrievers import VectorIndexRetriever
 from llama_index.core.query_engine import RetrieverQueryEngine
 from llama_index.core import Document
+from llama_index.core.vector_stores import MetadataFilters, ExactMatchFilter
 
 from index.index import user_messages_index
 
@@ -24,6 +25,20 @@ def add_user_message(
     extra_metadata: dict = None
 ):
     time = time or datetime.utcnow()
+
+    priority = query_user_messages("Return a single integer from 0-10 for this user. 0 indicates that the user is likely completely safe and is zero danger at all. 10 indicates that this user is in mortal danger and requires immediate assistance. Do not include in whitespace, backticks, etc. Just a single number please. If you have no relevant info just return 0.", user_id=user_id).response
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE users
+                SET priority = :priority
+                WHERE id = :id
+                """
+            ),
+            {"id": user_id, "priority": int(priority)}
+        )
+
 
     location_geom = WKTElement(f"POINT({lon} {lat})", srid=4326) if lat is not None and lon is not None else None
 
@@ -88,19 +103,37 @@ def query_user_messages(
             )
             postgis_filter_ids = [row[0] for row in result]
 
-    filters = []
+    filter_list = []
+
     if user_id:
-        filters.append({"key": "user_id", "value": user_id})
+        filter_list.append(ExactMatchFilter(key="user_id", value=user_id))
+
     if extra_filters:
         for k, v in extra_filters.items():
-            filters.append({"key": k, "value": v})
+            if isinstance(v, list):
+                filter_list.append(
+                    MetadataFilters(
+                        filters=[ExactMatchFilter(key=k, value=item) for item in v],
+                        condition="or"
+                    )
+                )
+            else:
+                filter_list.append(ExactMatchFilter(key=k, value=v))
+
     if postgis_filter_ids:
-        filters.append({"key": "message_id", "value": postgis_filter_ids})
+        filter_list.append(
+            MetadataFilters(
+                filters=[ExactMatchFilter(key="message_id", value=i) for i in postgis_filter_ids],
+                condition="or"
+            )
+        )
+
+    final_filters = MetadataFilters(filters=filter_list) if filter_list else None
 
     retriever = VectorIndexRetriever(
         index=user_messages_index,
         similarity_top_k=top_k,
-        filters=filters if filters else None
+        filters=final_filters
     )
 
     query_engine = RetrieverQueryEngine(

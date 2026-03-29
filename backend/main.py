@@ -13,7 +13,7 @@ from responders.responder import add_responder, update_responder
 from responders.responder_message import add_responder_message
 from users.user import add_user, update_user
 from users.user_message import add_user_message, query_user_messages
-from regions.region_gen import priority_polygons, normalize
+from regions.region_gen import priority_polygons
 
 load_dotenv()
 
@@ -80,15 +80,20 @@ manager = ConnectionManager()
 
 async def broadcast_periodic():
     loop = asyncio.get_running_loop()
+    prev_regions = []
+    reports = []
+
     while True:
         await asyncio.sleep(5)
 
         def get_locations_sync():
+            nonlocal prev_regions
             db = SessionLocal()
             try:
                 users_result = db.execute(text("""
                     SELECT ST_Y(location_geom::geometry) AS latitude,
-                           ST_X(location_geom::geometry) AS longitude
+                           ST_X(location_geom::geometry) AS longitude,
+                           priority
                     FROM users;
                 """))
 
@@ -99,9 +104,13 @@ async def broadcast_periodic():
                     FROM responders;
                 """))
 
-                all_locations = [list(row) + [0] for row in users_result] + [list(row) + [1] for row in responders_result]
+                all_locations = [list(row[:2]) + [0] for row in users_result] + [list(row[:2]) + [1] for row in responders_result]
 
-                regions = priority_polygons(all_locations)
+                print(list(users_result))
+                regions = priority_polygons(list(users_result))
+                if regions != prev_regions:
+                    print("Changed regions")
+                prev_regions = regions
 
                 return all_locations, regions
             finally:
@@ -109,12 +118,11 @@ async def broadcast_periodic():
 
         locations, regions = await loop.run_in_executor(None, get_locations_sync)
 
-        payload = normalize({
+        await manager.broadcast(json.dumps({
             "locations": locations,
-            "regions": regions
-        })
-
-        await manager.broadcast(json.dumps(payload))
+            "regions": regions,
+            "reports": reports
+        }))
 
 @app.on_event("startup")
 async def startup_event():
